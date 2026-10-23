@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist build
+          for target in windows/amd64 windows/arm64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="$os"
+            [ "$os" = darwin ] && name=macos
+            label="$arch"
+            [ "$arch" = amd64 ] && label=x86_64
+            exe=logcost
+            [ "$os" = windows ] && exe=logcost.exe
+            rm -rf build/*
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "build/$exe" ./cmd/logcost
+            if [ "$os" = windows ]; then
+              (cd build && zip -q "../dist/logcost-$name-$label.zip" "$exe")
+            else
+              tar -czf "dist/logcost-$name-$label.tar.gz" -C build "$exe"
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          awk -v v="${VERSION#v}" '$0 ~ "^## " v { found = 1; next } /^## / { found = 0 } found' CHANGELOG.md > notes.md
+          gh release create "$VERSION" dist/* --title "$VERSION" --notes-file notes.md
+
+  check-install:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - if: runner.os != 'Windows'
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh" | sh
+          ~/.local/bin/logcost -version
+          printf '2026-10-20T10:00:00Z INFO ok\n2026-10-21T10:00:00Z INFO ok\n' | ~/.local/bin/logcost
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/main/install.ps1" | iex
+          & "$env:LOCALAPPDATA\logcost\bin\logcost.exe" -version
