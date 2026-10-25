@@ -35,7 +35,7 @@ def main():
     out = read_output(kind, output)
     dropped_in = sum(1 for line in original if any(p.search(line) for p in drops))
     dropped_out = sum(1 for line in out if any(p.search(line) for p in drops))
-    important = lambda line: " ERROR " in line or " WARN " in line or line.startswith("\tat ")
+    important = lambda line: " ERROR " in line or " WARN " in line or line.lstrip().startswith("at ")
     important_in = sum(1 for line in original if important(line))
     important_out = sum(1 for line in out if important(line))
     expected = len(original) - dropped_in
