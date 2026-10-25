@@ -21,6 +21,8 @@ const (
 
 type Cluster struct {
 	Tokens  []string
+	Events  int64
+	JSON    int64
 	Lines   int64
 	Bytes   int64
 	Levels  [parse.LevelCount]int64

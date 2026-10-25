@@ -61,6 +61,19 @@ var templates = []template{
 	{1, func(w *bufio.Writer, r *rand.Rand, t time.Time) {
 		fmt.Fprintf(w, "%s ERROR [http] POST /api/login 500: db connection refused (postgres://app:%s@db.internal:5432/shop)\n", stamp(t), id(r))
 	}},
+	{1, func(w *bufio.Writer, r *rand.Rand, t time.Time) {
+		fmt.Fprintf(w, "%s ERROR [inventory] sync failed for warehouse %d\n", stamp(t), r.IntN(40))
+		fmt.Fprintf(w, "java.lang.IllegalStateException: stock record %s is locked\n", id(r))
+		for _, frame := range []string{"com.shop.inventory.StockRepository.lock(StockRepository.java:118)", "com.shop.inventory.SyncJob.apply(SyncJob.java:64)", "com.shop.inventory.SyncJob.run(SyncJob.java:41)", "java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)"} {
+			fmt.Fprintf(w, "\tat %s\n", frame)
+		}
+		fmt.Fprintf(w, "Caused by: java.sql.SQLTransientException: lock wait timeout after %dms\n", 5000+r.IntN(5000))
+		fmt.Fprintf(w, "\tat com.shop.db.Pool.execute(Pool.java:212)\n\t... %d more\n", 4+r.IntN(4))
+	}},
+	{1, func(w *bufio.Writer, r *rand.Rand, t time.Time) {
+		fmt.Fprintf(w, "%s ERROR [recommender] model refresh crashed\n", stamp(t))
+		fmt.Fprintf(w, "Traceback (most recent call last):\n  File \"/app/refresh.py\", line %d, in run\n    vectors = load(batch)\n  File \"/app/store.py\", line 88, in load\n    raise KeyError(key)\nKeyError: 'item:%d'\n", 30+r.IntN(20), r.IntN(90000))
+	}},
 }
 
 func parseSize(s string) (int64, error) {

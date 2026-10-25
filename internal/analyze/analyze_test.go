@@ -54,8 +54,8 @@ func TestCountsBytesLinesAndTime(t *testing.T) {
 	if !r.HasTime || r.Last.Sub(r.First) != 999*time.Minute {
 		t.Fatalf("time range %v - %v", r.First, r.Last)
 	}
-	if r.LevelLines[parse.Error] != 250 || r.LevelLines[parse.Info] != 750 {
-		t.Fatalf("levels %v", r.LevelLines)
+	if r.LevelEvents[parse.Error] != 250 || r.LevelEvents[parse.Info] != 750 {
+		t.Fatalf("levels %v", r.LevelEvents)
 	}
 }
 
@@ -128,6 +128,26 @@ func TestHostileLinesStaySmall(t *testing.T) {
 		if len(c.Template()) > 96*130 || len(c.Example) > maxExample {
 			t.Fatalf("template %d bytes, example %d bytes", len(c.Template()), len(c.Example))
 		}
+	}
+}
+
+func TestStackTracesAreOneEvent(t *testing.T) {
+	input := "2026-10-20T10:00:00Z ERROR sync failed\njava.lang.IllegalStateException: locked\n\tat a.B.c(B.java:1)\n\tat a.B.d(B.java:2)\n2026-10-20T10:00:01Z INFO ok\n"
+	r := run(t, input)
+	if r.Lines != 5 || r.Events != 2 || r.Bytes != int64(len(input)) {
+		t.Fatalf("lines %d events %d bytes %d", r.Lines, r.Events, r.Bytes)
+	}
+	for _, c := range r.Clusters {
+		if strings.HasPrefix(c.Template(), "ERROR") && (c.Lines != 4 || c.Events != 1) {
+			t.Fatalf("error event: lines %d events %d", c.Lines, c.Events)
+		}
+	}
+	r, err := Run(context.Background(), []Source{{Name: "x", Reader: strings.NewReader(input)}}, Options{NoMultiline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Events != 5 {
+		t.Fatalf("with multiline off: events %d", r.Events)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/wellkyc/logcost/internal/drain"
 	"github.com/wellkyc/logcost/internal/mask"
+	"github.com/wellkyc/logcost/internal/multiline"
 	"github.com/wellkyc/logcost/internal/parse"
 )
 
@@ -32,6 +33,7 @@ type Options struct {
 	Workers     int
 	MaxLine     int
 	MaxClusters int
+	NoMultiline bool
 }
 
 type Source struct {
@@ -40,20 +42,22 @@ type Source struct {
 }
 
 type Result struct {
-	Clusters   []*drain.Cluster
-	Lines      int64
-	Bytes      int64
-	LevelBytes [parse.LevelCount]int64
-	LevelLines [parse.LevelCount]int64
-	First      time.Time
-	Last       time.Time
-	HasTime    bool
-	CutLines   int64
+	Clusters    []*drain.Cluster
+	Lines       int64
+	Events      int64
+	Bytes       int64
+	LevelBytes  [parse.LevelCount]int64
+	LevelEvents [parse.LevelCount]int64
+	First       time.Time
+	Last        time.Time
+	HasTime     bool
+	CutLines    int64
 }
 
 type line struct {
-	text []byte
-	size int64
+	text  []byte
+	size  int64
+	lines int64
 }
 
 type batch struct {
@@ -65,6 +69,8 @@ type item struct {
 	tokens  []string
 	key     string
 	size    int64
+	lines   int64
+	json    bool
 	level   parse.Level
 	time    time.Time
 	hasTime bool
@@ -106,7 +112,7 @@ func Run(ctx context.Context, sources []Source, opts Options) (*Result, error) {
 		defer close(batches)
 		index := 0
 		for _, src := range sources {
-			cut, err := read(ctx, src, opts.MaxLine, &index, slots, batches)
+			cut, err := read(ctx, src, opts, &index, slots, batches)
 			result.CutLines += cut
 			if err != nil {
 				readErr = err
@@ -168,7 +174,11 @@ func collect(miner *drain.Miner, r *Result, items []item) {
 	for i := range items {
 		it := &items[i]
 		c := miner.Add(it.tokens, it.key)
-		c.Lines++
+		c.Events++
+		c.Lines += it.lines
+		if it.json {
+			c.JSON++
+		}
 		c.Bytes += it.size
 		c.Levels[it.level]++
 		if c.Example == "" {
@@ -178,10 +188,11 @@ func collect(miner *drain.Miner, r *Result, items []item) {
 			}
 			c.Example = strings.ToValidUTF8(strings.TrimRight(string(raw), "\r\n"), "")
 		}
-		r.Lines++
+		r.Events++
+		r.Lines += it.lines
 		r.Bytes += it.size
 		r.LevelBytes[it.level] += it.size
-		r.LevelLines[it.level]++
+		r.LevelEvents[it.level]++
 		if it.hasTime {
 			if !r.HasTime || it.time.Before(r.First) {
 				r.First = it.time
@@ -207,6 +218,8 @@ func process(b batch) processed {
 			tokens:  tokens,
 			key:     strings.Join(tokens, " "),
 			size:    l.size,
+			lines:   l.lines,
+			json:    rec.JSON,
 			level:   rec.Level,
 			time:    rec.Time,
 			hasTime: rec.HasTime,
@@ -232,7 +245,7 @@ func open(r io.Reader) (io.Reader, error) {
 	return br, nil
 }
 
-func read(ctx context.Context, src Source, maxLine int, index *int, slots chan<- struct{}, out chan<- batch) (int64, error) {
+func read(ctx context.Context, src Source, opts Options, index *int, slots chan<- struct{}, out chan<- batch) (int64, error) {
 	r, err := open(src.Reader)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", src.Name, err)
@@ -262,16 +275,39 @@ func read(ctx context.Context, src Source, maxLine int, index *int, slots chan<-
 		current = batch{index: *index, lines: make([]line, 0, batchLines)}
 		return true
 	}
+	var splitter multiline.Splitter
+	var event line
+	push := func() bool {
+		if event.lines == 0 {
+			return true
+		}
+		current.lines = append(current.lines, event)
+		pendingBytes += int64(len(event.text))
+		event = line{}
+		if len(current.lines) == batchLines || pendingBytes >= batchBytes {
+			return flush()
+		}
+		return true
+	}
 	for {
-		text, size, truncated, err := readLine(br, maxLine)
+		text, size, truncated, err := readLine(br, opts.MaxLine)
 		if size > 0 {
-			current.lines = append(current.lines, line{text: text, size: size})
-			pendingBytes += int64(len(text))
 			if truncated {
 				cut++
 			}
-			if (len(current.lines) == batchLines || pendingBytes >= batchBytes) && !flush() {
-				return cut, ctx.Err()
+			if event.lines > 0 && !opts.NoMultiline && splitter.Continues(text) {
+				event.size += size
+				event.lines++
+			} else {
+				if opts.NoMultiline {
+					splitter.Reset()
+				} else if event.lines == 0 {
+					splitter.Continues(text)
+				}
+				if !push() {
+					return cut, ctx.Err()
+				}
+				event = line{text: text, size: size, lines: 1}
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -281,7 +317,7 @@ func read(ctx context.Context, src Source, maxLine int, index *int, slots chan<-
 			return cut, fmt.Errorf("%s: %w", src.Name, err)
 		}
 	}
-	if !flush() {
+	if !push() || !flush() {
 		return cut, ctx.Err()
 	}
 	return cut, nil

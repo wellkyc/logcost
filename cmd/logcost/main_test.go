@@ -67,12 +67,46 @@ func TestJSONFormat(t *testing.T) {
 	}
 }
 
+const noisy = `2026-10-20T00:00:00Z INFO GET /healthz 200 in 3ms
+2026-10-20T06:00:00Z INFO GET /healthz 200 in 5ms
+2026-10-20T08:00:00Z DEBUG cache hit key=7 ttl=30s
+2026-10-20T12:00:00Z ERROR login failed password=hunter2 for anna@example.com
+2026-10-21T00:00:00Z INFO GET /healthz 200 in 4ms
+`
+
+func TestSuggest(t *testing.T) {
+	path := write(t, "app.log", noisy)
+	code, out, errOut := runCLI(t, "-suggest", path)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	for _, want := range []string{"Suggestions:", "health check", "debug level", "-filter vector"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestFilterConfigs(t *testing.T) {
+	path := write(t, "app.log", noisy)
+	for tool, want := range map[string]string{"vector": "type: filter", "fluentbit": "[FILTER]", "otel": "filter/logcost"} {
+		code, out, errOut := runCLI(t, "-filter", tool, path)
+		if code != 0 || !strings.Contains(out, want) {
+			t.Errorf("%s: exit %d, stderr %q, out:\n%s", tool, code, errOut, out)
+		}
+		if strings.Contains(out, "hunter2") || strings.Contains(out, "ERROR") {
+			t.Errorf("%s config touches errors or leaks secrets:\n%s", tool, out)
+		}
+	}
+}
+
 func TestBadArguments(t *testing.T) {
 	cases := [][]string{
 		{"-format", "xml", "x"},
 		{"-period", "soon", "x"},
 		{"-similarity", "2", "x"},
 		{"-price", "-1", "x"},
+		{"-filter", "splunk", "x"},
 	}
 	for _, args := range cases {
 		if code, _, _ := runCLI(t, args...); code != 2 {

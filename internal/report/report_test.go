@@ -25,8 +25,8 @@ func result() *analyze.Result {
 		Last:     time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
 		HasTime:  true,
 	}
-	r.LevelBytes[parse.Info], r.LevelLines[parse.Info] = 9_000_000_000, 900
-	r.LevelBytes[parse.Error], r.LevelLines[parse.Error] = 1_000_000_000, 100
+	r.LevelBytes[parse.Info], r.LevelEvents[parse.Info] = 9_000_000_000, 900
+	r.LevelBytes[parse.Error], r.LevelEvents[parse.Error] = 1_000_000_000, 100
 	return r
 }
 

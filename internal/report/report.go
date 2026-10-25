@@ -12,6 +12,7 @@ import (
 	"github.com/wellkyc/logcost/internal/drain"
 	"github.com/wellkyc/logcost/internal/parse"
 	"github.com/wellkyc/logcost/internal/redact"
+	"github.com/wellkyc/logcost/internal/suggest"
 	"github.com/wellkyc/logcost/internal/textsafe"
 )
 
@@ -25,11 +26,13 @@ type Options struct {
 	Redact   bool
 	Width    int
 	Color    bool
+	Suggest  bool
 }
 
 type Row struct {
 	Share    float64  `json:"share"`
 	Bytes    int64    `json:"bytes"`
+	Events   int64    `json:"events"`
 	Lines    int64    `json:"lines"`
 	Monthly  *float64 `json:"monthly_cost,omitempty"`
 	Level    string   `json:"level"`
@@ -41,24 +44,41 @@ type LevelRow struct {
 	Level   string   `json:"level"`
 	Share   float64  `json:"share"`
 	Bytes   int64    `json:"bytes"`
-	Lines   int64    `json:"lines"`
+	Events  int64    `json:"events"`
 	Monthly *float64 `json:"monthly_cost,omitempty"`
 }
 
+type SuggestionRow struct {
+	Action   string   `json:"action"`
+	Keep     string   `json:"keep,omitempty"`
+	Reason   string   `json:"reason"`
+	Share    float64  `json:"saved_share"`
+	Bytes    int64    `json:"saved_bytes"`
+	Monthly  *float64 `json:"saved_monthly,omitempty"`
+	Template string   `json:"template"`
+	Pattern  string   `json:"pattern"`
+	Example  string   `json:"example,omitempty"`
+}
+
 type Summary struct {
-	Bytes        int64      `json:"bytes"`
-	Lines        int64      `json:"lines"`
-	Templates    int        `json:"templates"`
-	From         *time.Time `json:"from,omitempty"`
-	To           *time.Time `json:"to,omitempty"`
-	PeriodHours  *float64   `json:"period_hours,omitempty"`
-	PricePerGB   float64    `json:"price_per_gb"`
-	Monthly      *float64   `json:"monthly_cost,omitempty"`
-	TruncatedLns int64      `json:"truncated_lines,omitempty"`
-	Levels       []LevelRow `json:"levels"`
-	Rows         []Row      `json:"templates_top"`
-	RestShare    float64    `json:"rest_share,omitempty"`
-	RestCount    int        `json:"rest_templates,omitempty"`
+	Bytes        int64                `json:"bytes"`
+	Lines        int64                `json:"lines"`
+	Events       int64                `json:"events"`
+	Templates    int                  `json:"templates"`
+	From         *time.Time           `json:"from,omitempty"`
+	To           *time.Time           `json:"to,omitempty"`
+	PeriodHours  *float64             `json:"period_hours,omitempty"`
+	PricePerGB   float64              `json:"price_per_gb"`
+	Monthly      *float64             `json:"monthly_cost,omitempty"`
+	TruncatedLns int64                `json:"truncated_lines,omitempty"`
+	Levels       []LevelRow           `json:"levels"`
+	Rows         []Row                `json:"templates_top"`
+	RestShare    float64              `json:"rest_share,omitempty"`
+	RestCount    int                  `json:"rest_templates,omitempty"`
+	Suggestions  []SuggestionRow      `json:"suggestions,omitempty"`
+	SavedShare   float64              `json:"saved_share,omitempty"`
+	SavedMonthly *float64             `json:"saved_monthly,omitempty"`
+	Raw          []suggest.Suggestion `json:"-"`
 }
 
 func period(r *analyze.Result, o Options) time.Duration {
@@ -99,6 +119,7 @@ func Build(r *analyze.Result, o Options) Summary {
 	s := Summary{
 		Bytes:        r.Bytes,
 		Lines:        r.Lines,
+		Events:       r.Events,
 		Templates:    len(r.Clusters),
 		PricePerGB:   o.Price,
 		Monthly:      cost(r.Bytes),
@@ -113,14 +134,14 @@ func Build(r *analyze.Result, o Options) Summary {
 		s.PeriodHours = &hours
 	}
 	for l := parse.Level(0); l < parse.LevelCount; l++ {
-		if r.LevelLines[l] == 0 {
+		if r.LevelEvents[l] == 0 {
 			continue
 		}
 		s.Levels = append(s.Levels, LevelRow{
 			Level:   l.String(),
 			Share:   share(r.LevelBytes[l]),
 			Bytes:   r.LevelBytes[l],
-			Lines:   r.LevelLines[l],
+			Events:  r.LevelEvents[l],
 			Monthly: cost(r.LevelBytes[l]),
 		})
 	}
@@ -135,6 +156,31 @@ func Build(r *analyze.Result, o Options) Summary {
 		s.RestShare += share(c.Bytes)
 		s.RestCount++
 	}
+	if o.Suggest {
+		s.Raw = suggest.Find(r.Clusters, r.Bytes)
+		var saved int64
+		for _, sg := range s.Raw {
+			saved += sg.Saved
+			sr := SuggestionRow{
+				Action:   sg.Action,
+				Reason:   sg.Reason,
+				Share:    share(sg.Saved),
+				Bytes:    sg.Saved,
+				Monthly:  cost(sg.Saved),
+				Template: textsafe.Sanitize(sg.Template),
+				Pattern:  sg.Pattern,
+			}
+			if sg.Action == suggest.Sample {
+				sr.Keep = fmt.Sprintf("1 in %d", sg.Rate)
+			}
+			if o.Examples {
+				sr.Example = textsafe.Sanitize(sg.Example)
+			}
+			s.Suggestions = append(s.Suggestions, sr)
+		}
+		s.SavedShare = share(saved)
+		s.SavedMonthly = cost(saved)
+	}
 	return s
 }
 
@@ -142,6 +188,7 @@ func row(c *drain.Cluster, share float64, monthly *float64, o Options) Row {
 	rw := Row{
 		Share:    share,
 		Bytes:    c.Bytes,
+		Events:   c.Events,
 		Lines:    c.Lines,
 		Monthly:  monthly,
 		Level:    c.Level().String(),

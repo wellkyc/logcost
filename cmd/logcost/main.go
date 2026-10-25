@@ -15,6 +15,7 @@ import (
 
 	"github.com/wellkyc/logcost/internal/analyze"
 	"github.com/wellkyc/logcost/internal/report"
+	"github.com/wellkyc/logcost/internal/suggest"
 )
 
 var version = "dev"
@@ -89,6 +90,9 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	examples := flags.Bool("examples", false, "show an example line for each template")
 	noRedact := flags.Bool("no-redact", false, "do not hide passwords, tokens and emails in the output")
 	similarity := flags.Float64("similarity", 0.4, "how similar lines must be to share a template, 0.1 to 0.9")
+	suggestFlag := flags.Bool("suggest", false, "suggest templates to drop or sample and show the savings")
+	filter := flags.String("filter", "", "print a config that drops the suggested templates: vector, fluentbit or otel")
+	multilineFlag := flags.Bool("multiline", true, "join stack traces and indented lines into one event")
 	showVersion := flags.Bool("version", false, "print the version")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, usage)
@@ -121,6 +125,12 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	case "table", "json", "markdown", "md":
 	default:
 		fmt.Fprintf(stderr, "logcost: unknown format %q, use table, json or markdown\n", *format)
+		return 2
+	}
+	switch *filter {
+	case "", "vector", "fluentbit", "fluent-bit", "otel":
+	default:
+		fmt.Fprintf(stderr, "logcost: unknown filter %q, use vector, fluentbit or otel\n", *filter)
 		return 2
 	}
 
@@ -158,7 +168,7 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	result, err := analyze.Run(ctx, sources, analyze.Options{Similarity: *similarity})
+	result, err := analyze.Run(ctx, sources, analyze.Options{Similarity: *similarity, NoMultiline: !*multilineFlag})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return 130
@@ -176,12 +186,28 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		Examples: *examples,
 		Redact:   !*noRedact,
 		Color:    tty && colorAllowed(),
+		Suggest:  *suggestFlag || *filter != "",
 	}
 	opts.Width = 4000
 	if tty {
 		opts.Width = terminalWidth()
 	}
 	summary := report.Build(result, opts)
+	if *filter != "" {
+		switch *filter {
+		case "vector":
+			err = suggest.Vector(stdout, summary.Raw, version)
+		case "otel":
+			err = suggest.OTel(stdout, summary.Raw, version)
+		default:
+			err = suggest.FluentBit(stdout, summary.Raw, version)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "logcost:", err)
+			return 1
+		}
+		return 0
+	}
 	switch strings.ToLower(*format) {
 	case "json":
 		err = report.JSON(stdout, summary)

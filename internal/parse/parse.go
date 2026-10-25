@@ -33,6 +33,7 @@ func (l Level) String() string {
 }
 
 type Record struct {
+	JSON    bool
 	Message string
 	Level   Level
 	Time    time.Time
@@ -66,7 +67,7 @@ func jsonLine(line string) (Record, bool) {
 	for k, v := range fields {
 		lower[strings.ToLower(k)] = v
 	}
-	var rec Record
+	rec := Record{JSON: true}
 	for _, key := range messageKeys {
 		if s, ok := jsonString(lower[key]); ok {
 			inner := textLine(s)

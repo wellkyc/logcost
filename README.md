@@ -6,24 +6,67 @@ Most of a log bill usually comes from a handful of lines: health checks, debug o
 
 ```
 $ logcost -price 1.70 app.log
-1.0 GB in 9.6M lines, 11 templates, covering 7d
+1.0 GB in 10.3M lines (9.1M events), 13 templates, covering 7d
 about $7.29/month at $1.70 per GB (set your price with -price)
 
-by level: TRACE 2.8%, DEBUG 23.8%, INFO 63.3%, WARN 5.6%, ERROR 4.5%
+by level: TRACE 2.6%, DEBUG 22.1%, INFO 58.8%, WARN 5.2%, ERROR 11.2%
 
- SHARE      SIZE    LINES   $/MONTH  LEVEL  TEMPLATE
- 23.7%    237 MB     1.3M     $1.73  INFO   request finished
- 22.7%    227 MB     2.9M     $1.66  INFO   INFO [http] GET /healthz <*> in <*> from <*>
- 13.7%    137 MB     1.7M     $1.00  DEBUG  DEBUG [cache] hit key=<*> ttl=<*> size=<*>
- 10.1%    101 MB   861.5K     $0.74  DEBUG  DEBUG [db] SELECT * FROM orders WHERE user_id = <*> AND status = 'open' LIMIT <*> took <*>
-  8.0%   80.4 MB   765.7K     $0.59  INFO   INFO [kafka] committed offset <*> for partition <*> of topic orders.events
-  7.2%   72.4 MB   573.5K     $0.53  INFO   INFO [auth] user <*> logged in, session_id=<*> token=<*>
-  5.6%   56.3 MB   477.1K     $0.41  WARN   WARN [payments] retrying charge <*>, attempt <*> of <*>: upstream timeout after <*>
-  3.2%   31.9 MB   288.3K     $0.23  ERROR  ERROR [orders] failed to reserve stock for order <*>: item <*> out of stock
-  5.7%  ... 3 more templates
+ SHARE      SIZE   EVENTS   $/MONTH  LEVEL  TEMPLATE
+ 22.0%    220 MB     1.2M     $1.60  INFO   request finished
+ 21.1%    211 MB     2.7M     $1.54  INFO   INFO [http] GET /healthz <*> in <*> from <*>
+ 12.7%    127 MB     1.6M     $0.93  DEBUG  DEBUG [cache] hit key=<*> ttl=<*> size=<*>
+  9.4%   94.2 MB   799.9K     $0.69  DEBUG  DEBUG [db] SELECT * FROM orders WHERE user_id = <*> AND status = 'open' LIMIT <*> took <*>
+  7.5%   74.8 MB   711.6K     $0.54  INFO   INFO [kafka] committed offset <*> for partition <*> of topic orders.events
+  6.7%   67.3 MB   533.3K     $0.49  INFO   INFO [auth] user <*> logged in, session_id=<*> token=<*>
+  5.2%   52.4 MB   444.3K     $0.38  WARN   WARN [payments] retrying charge <*>, attempt <*> of <*>: upstream timeout after <*>
+  4.8%   48.2 MB    89.1K     $0.35  ERROR  ERROR [inventory] sync failed for warehouse <*>
+ 10.5%  ... 5 more templates
 ```
 
-That's a generated week of logs from a made-up shop. In this case health checks and cache hits are a third of everything, and nobody reads them.
+That's a generated week of logs from a made-up shop. Health checks and cache hits are a third of everything, and nobody reads them. The `ERROR [inventory]` row is 89K events but 48 MB, because each of them carries a Java stack trace, which logcost counts as part of the same event.
+
+## Cutting the bill
+
+Add `-suggest` and logcost points at what can go:
+
+```
+Suggestions: about $4.79/month, 65.7% of the volume
+ACTION                 SAVES   $/MONTH  WHY           TEMPLATE
+drop                   21.1%     $1.54  health check  INFO [http] GET /healthz <*> in <*> from <*>
+sample, keep 1 in 10   19.8%     $1.44  high volume   request finished
+drop                   12.7%     $0.93  debug level   DEBUG [cache] hit key=<*> ttl=<*> size=<*>
+drop                    9.4%     $0.69  debug level   DEBUG [db] SELECT * FROM orders WHERE user_id = <*> AND status = 'open' LIMIT <*> took <*>
+drop                    2.6%     $0.19  trace level   TRACE [scheduler] tick worker=<*> queue_depth=<*>
+```
+
+It picks debug and trace output, health checks and probes, and suggests keeping 1 in 10 of any info template bigger than 8%. Warnings and errors are never on the list. These are guesses from the log alone, so read them before you act: maybe that debug line is the one you need during incidents.
+
+Then `-filter` turns the list into a config for your log shipper:
+
+```bash
+logcost -filter vector app.log      # filter + sample transforms for Vector
+logcost -filter fluentbit app.log   # grep filters for Fluent Bit
+logcost -filter otel app.log        # filter processor for the OpenTelemetry Collector
+```
+
+```yaml
+transforms:
+  logcost_drop:
+    type: filter
+    inputs: [your_source]
+    condition: |-
+      msg = to_string(.message) ?? ""
+      !(match(msg, r'INFO\s+\[http\]\s+GET\s+/healthz\s+\S+\s+in\s+\S+\s+from\s+\S+\s*$') || ...)
+  logcost_sample:
+    type: sample
+    inputs: [logcost_drop]
+    rate: 10
+    ...
+```
+
+Fluent Bit and the filter processor can't sample by pattern, so for them only the drop rules are written. Secrets are hidden in the patterns too, so a constant token in a log line won't end up in your config repo. Every push runs the generated configs through real Vector, Fluent Bit and OpenTelemetry Collector containers and checks that they drop exactly the suggested lines and keep every warning and error ([scripts/check-configs.sh](scripts/check-configs.sh)).
+
+The rules match the first line of an event. If your shipper splits stack traces into separate records, the frames of a dropped event will still go through.
 
 ## Install
 
@@ -66,6 +109,9 @@ Flags:
 | `-top` | `20` | how many templates to list |
 | `-examples` | off | print a real line under each template |
 | `-format` | `table` | `table`, `json` or `markdown` (handy for pasting into a ticket) |
+| `-suggest` | off | list templates to drop or sample, with savings |
+| `-filter` | | print a config for `vector`, `fluentbit` or `otel` that drops the suggested lines |
+| `-multiline` | on | join stack traces and indented lines into one event, `-multiline=false` to count every line |
 | `-similarity` | `0.4` | lower merges more lines into one template, higher splits them |
 | `-no-redact` | off | show secrets and emails as they are, see below |
 
@@ -75,7 +121,9 @@ It understands plain text logs (ISO timestamps, syslog, nginx/apache access logs
 
 ## How it works
 
-Each line gets its variable parts replaced with `<*>` first: numbers, durations, IPs, UUIDs, hashes, dates, emails, IDs inside URL paths. Then the lines go through [Drain](https://jiemingzhu.github.io/pub/pjhe_icws2017.pdf), a log parsing algorithm that puts lines with the same length and first word into a tree and merges them when enough words match. Lines that turn out identical after masking skip the tree through a cache, which is why repetitive logs are fast.
+Lines that continue an event (indented lines, `Caused by:`, Java exception lines, Python tracebacks) are glued to the line that started it. The event is counted with its full size, but the template comes from the first line.
+
+Each event then gets its variable parts replaced with `<*>`: numbers, durations, IPs, UUIDs, hashes, dates, emails, IDs inside URL paths. After that the events go through [Drain](https://jiemingzhu.github.io/pub/pjhe_icws2017.pdf), a log parsing algorithm that puts lines with the same length and first word into a tree and merges them when enough words match. Lines that turn out identical after masking skip the tree through a cache, which is why repetitive logs are fast.
 
 Reading and parsing run on all CPU cores, the template tree is updated in one goroutine in the original line order, so you get the same result no matter how many cores you have. On a 6-core laptop it does about 160 MB/s; 1 GB took 6 seconds and 80 MB of memory.
 
