@@ -174,6 +174,9 @@ func signedMoney(v *float64) string {
 	if v == nil {
 		return "-"
 	}
+	if math.Abs(*v) < 0.005 {
+		return "$0"
+	}
 	if *v < 0 {
 		neg := -*v
 		return "-" + Money(&neg)

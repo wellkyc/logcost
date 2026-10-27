@@ -134,7 +134,8 @@ func TestDiffOutputsAreSafe(t *testing.T) {
 
 func TestSignedFormatting(t *testing.T) {
 	plus, minus := 12.5, -3.25
-	if signedMoney(&plus) != "+$12.50" || signedMoney(&minus) != "-$3.25" || signedMoney(nil) != "-" {
+	zero := 0.001
+	if signedMoney(&plus) != "+$12.50" || signedMoney(&minus) != "-$3.25" || signedMoney(nil) != "-" || signedMoney(&zero) != "$0" {
 		t.Fatal("signedMoney is wrong")
 	}
 	if signedPercent(0.123) != "+12.3%" || signedPercent(-0.5) != "-50.0%" {
