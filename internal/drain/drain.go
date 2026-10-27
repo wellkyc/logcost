@@ -19,7 +19,13 @@ const (
 	OtherName     = "<other lines, too many templates>"
 )
 
+type Side struct {
+	Bytes  int64
+	Events int64
+}
+
 type Cluster struct {
+	Sides   [2]Side
 	Tokens  []string
 	Events  int64
 	JSON    int64

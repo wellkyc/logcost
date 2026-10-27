@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- `-diff before.log after.log` shows which templates are new, gone, grew or shrank, compared per day when both inputs have timestamps
+- `-max-growth 20%` makes `-diff` exit with code 3 when the log volume grows more than that, for CI
+- `-diff` works with all output formats; Markdown fits a pull request comment
+- `tools/loggen -release` writes logs as they would look after a made-up release, to try `-diff` on
+
 ## 0.2.0
 
 - `-suggest` lists templates worth dropping or sampling (debug and trace output, health checks, the biggest info templates) with the money it saves; warnings and errors are never suggested

@@ -100,6 +100,47 @@ func TestFilterConfigs(t *testing.T) {
 	}
 }
 
+func TestDiff(t *testing.T) {
+	before := write(t, "before.log", "2026-10-20T00:00:00Z INFO ok\n2026-10-21T00:00:00Z INFO ok\n")
+	after := write(t, "after.log", "2026-10-22T00:00:00Z INFO ok\n2026-10-22T12:00:00Z WARN retry payment 1\n2026-10-22T18:00:00Z WARN retry payment 2\n2026-10-23T00:00:00Z INFO ok\n")
+	code, out, errOut := runCLI(t, "-diff", before, after)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	for _, want := range []string{"before:", "after:", "new", "WARN retry payment <*>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if code, _, errOut := runCLI(t, "-diff", "-max-growth", "20%", before, after); code != 3 || !strings.Contains(errOut, "grew") {
+		t.Fatalf("max-growth: exit %d, stderr %q", code, errOut)
+	}
+	if code, _, _ := runCLI(t, "-diff", "-max-growth", "500", before, after); code != 0 {
+		t.Fatalf("generous max-growth: exit %d", code)
+	}
+	if code, out, _ := runCLI(t, "-diff", "-format", "markdown", before, after); code != 0 || !strings.Contains(out, "## Log volume change") {
+		t.Fatalf("markdown: exit %d\n%s", code, out)
+	}
+}
+
+func TestDiffArguments(t *testing.T) {
+	path := write(t, "a.log", "x\n")
+	cases := [][]string{
+		{"-diff", path},
+		{"-diff", path, path, path},
+		{"-diff", "-suggest", path, path},
+		{"-diff", "-", "-"},
+		{"-max-growth", "10%", path},
+		{"-diff", "-max-growth", "lots", path, path},
+		{"-diff", "-max-growth", "-5%", path, path},
+	}
+	for _, args := range cases {
+		if code, _, _ := runCLI(t, args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+}
+
 func TestBadArguments(t *testing.T) {
 	cases := [][]string{
 		{"-format", "xml", "x"},

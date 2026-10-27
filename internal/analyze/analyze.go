@@ -39,6 +39,31 @@ type Options struct {
 type Source struct {
 	Name   string
 	Reader io.Reader
+	Side   int
+}
+
+type Span struct {
+	Bytes   int64
+	Events  int64
+	Lines   int64
+	First   time.Time
+	Last    time.Time
+	HasTime bool
+}
+
+func (s *Span) add(size, lines int64, t time.Time, hasTime bool) {
+	s.Bytes += size
+	s.Events++
+	s.Lines += lines
+	if hasTime {
+		if !s.HasTime || t.Before(s.First) {
+			s.First = t
+		}
+		if !s.HasTime || t.After(s.Last) {
+			s.Last = t
+		}
+		s.HasTime = true
+	}
 }
 
 type Result struct {
@@ -52,6 +77,7 @@ type Result struct {
 	Last        time.Time
 	HasTime     bool
 	CutLines    int64
+	Sides       [2]Span
 }
 
 type line struct {
@@ -62,6 +88,7 @@ type line struct {
 
 type batch struct {
 	index int
+	side  int
 	lines []line
 }
 
@@ -79,6 +106,7 @@ type item struct {
 
 type processed struct {
 	index int
+	side  int
 	items []item
 }
 
@@ -152,7 +180,7 @@ func Run(ctx context.Context, sources []Source, opts Options) (*Result, error) {
 				break
 			}
 			delete(pending, next)
-			collect(miner, result, ready.items)
+			collect(miner, result, ready.side, ready.items)
 			<-slots
 			next++
 		}
@@ -170,7 +198,7 @@ func Run(ctx context.Context, sources []Source, opts Options) (*Result, error) {
 	return result, nil
 }
 
-func collect(miner *drain.Miner, r *Result, items []item) {
+func collect(miner *drain.Miner, r *Result, side int, items []item) {
 	for i := range items {
 		it := &items[i]
 		c := miner.Add(it.tokens, it.key)
@@ -180,6 +208,8 @@ func collect(miner *drain.Miner, r *Result, items []item) {
 			c.JSON++
 		}
 		c.Bytes += it.size
+		c.Sides[side].Bytes += it.size
+		c.Sides[side].Events++
 		c.Levels[it.level]++
 		if c.Example == "" {
 			raw := it.raw
@@ -193,6 +223,7 @@ func collect(miner *drain.Miner, r *Result, items []item) {
 		r.Bytes += it.size
 		r.LevelBytes[it.level] += it.size
 		r.LevelEvents[it.level]++
+		r.Sides[side].add(it.size, it.lines, it.time, it.hasTime)
 		if it.hasTime {
 			if !r.HasTime || it.time.Before(r.First) {
 				r.First = it.time
@@ -226,7 +257,7 @@ func process(b batch) processed {
 			raw:     l.text,
 		}
 	}
-	return processed{index: b.index, items: items}
+	return processed{index: b.index, side: b.side, items: items}
 }
 
 func open(r io.Reader) (io.Reader, error) {
@@ -255,7 +286,11 @@ func read(ctx context.Context, src Source, opts Options, index *int, slots chan<
 		br = bufio.NewReaderSize(r, readBuffer)
 	}
 	var cut, pendingBytes int64
-	current := batch{index: *index, lines: make([]line, 0, batchLines)}
+	side := src.Side
+	if side < 0 || side > 1 {
+		side = 0
+	}
+	current := batch{index: *index, side: side, lines: make([]line, 0, batchLines)}
 	flush := func() bool {
 		if len(current.lines) == 0 {
 			return true
@@ -272,7 +307,7 @@ func read(ctx context.Context, src Source, opts Options, index *int, slots chan<
 		}
 		*index++
 		pendingBytes = 0
-		current = batch{index: *index, lines: make([]line, 0, batchLines)}
+		current = batch{index: *index, side: side, lines: make([]line, 0, batchLines)}
 		return true
 	}
 	var splitter multiline.Splitter

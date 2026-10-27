@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"runtime"
@@ -25,6 +26,7 @@ const usage = `logcost shows which log lines take up the most space and money.
 Usage:
   logcost [flags] [file ...]
   some-command | logcost [flags]
+  logcost -diff [flags] before.log after.log
 
 Files can be plain text or gzip. With no files, logcost reads stdin.
 
@@ -56,6 +58,18 @@ func parsePeriod(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid period %q, use something like 90m, 24h, 7d or 2w", s)
 	}
 	return d, nil
+}
+
+func parseGrowth(s string) (*float64, error) {
+	if s == "" {
+		return nil, nil
+	}
+	n, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(s), "%"), 64)
+	if err != nil || n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
+		return nil, fmt.Errorf("invalid -max-growth %q, use a percentage like 20%%", s)
+	}
+	v := n / 100
+	return &v, nil
 }
 
 func isTerminal(f *os.File) bool {
@@ -93,6 +107,8 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	suggestFlag := flags.Bool("suggest", false, "suggest templates to drop or sample and show the savings")
 	filter := flags.String("filter", "", "print a config that drops the suggested templates: vector, fluentbit or otel")
 	multilineFlag := flags.Bool("multiline", true, "join stack traces and indented lines into one event")
+	diffFlag := flags.Bool("diff", false, "compare two inputs: logcost -diff before.log after.log")
+	maxGrowthFlag := flags.String("max-growth", "", "with -diff, exit with code 3 if the volume per day grew more than this, e.g. 20%")
 	showVersion := flags.Bool("version", false, "print the version")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, usage)
@@ -134,6 +150,28 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	maxGrowth, err := parseGrowth(*maxGrowthFlag)
+	if err != nil {
+		fmt.Fprintln(stderr, "logcost:", err)
+		return 2
+	}
+	if *maxGrowthFlag != "" && !*diffFlag {
+		fmt.Fprintln(stderr, "logcost: -max-growth only works with -diff")
+		return 2
+	}
+	if *diffFlag && (*suggestFlag || *filter != "") {
+		fmt.Fprintln(stderr, "logcost: -diff can't be combined with -suggest or -filter")
+		return 2
+	}
+	if *diffFlag && len(flags.Args()) != 2 {
+		fmt.Fprintln(stderr, "logcost: -diff needs exactly two inputs, before and after")
+		return 2
+	}
+	if *diffFlag && flags.Arg(0) == "-" && flags.Arg(1) == "-" {
+		fmt.Fprintln(stderr, "logcost: only one side of -diff can come from stdin")
+		return 2
+	}
+
 	var sources []analyze.Source
 	files := flags.Args()
 	if len(files) == 0 {
@@ -143,9 +181,13 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		}
 		files = []string{"-"}
 	}
-	for _, name := range files {
+	for i, name := range files {
+		side := 0
+		if *diffFlag {
+			side = i
+		}
 		if name == "-" {
-			sources = append(sources, analyze.Source{Name: "stdin", Reader: stdin})
+			sources = append(sources, analyze.Source{Name: "stdin", Reader: stdin, Side: side})
 			continue
 		}
 		info, err := os.Stat(name)
@@ -163,7 +205,7 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer f.Close()
-		sources = append(sources, analyze.Source{Name: name, Reader: f})
+		sources = append(sources, analyze.Source{Name: name, Reader: f, Side: side})
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -191,6 +233,30 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	opts.Width = 4000
 	if tty {
 		opts.Width = terminalWidth()
+	}
+	if *diffFlag {
+		d := report.BuildDiff(result, opts)
+		switch strings.ToLower(*format) {
+		case "json":
+			err = report.DiffJSON(stdout, d)
+		case "markdown", "md":
+			err = report.DiffMarkdown(stdout, d)
+		default:
+			err = report.DiffTable(stdout, d, opts)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "logcost:", err)
+			return 1
+		}
+		if maxGrowth != nil && d.Exceeds(*maxGrowth) {
+			fmt.Fprintf(stderr, "logcost: log volume grew %+.1f%%, more than the allowed %s\n", *d.Growth*100, *maxGrowthFlag)
+			return 3
+		}
+		if maxGrowth != nil && d.Growth == nil {
+			fmt.Fprintln(stderr, "logcost: can't check -max-growth, the before input is empty")
+			return 3
+		}
+		return 0
 	}
 	summary := report.Build(result, opts)
 	if *filter != "" {

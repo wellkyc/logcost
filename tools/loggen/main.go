@@ -76,6 +76,17 @@ var templates = []template{
 	}},
 }
 
+func afterRelease(list []template) []template {
+	out := make([]template, len(list))
+	copy(out, list)
+	out[1].weight = 6
+	out[6].weight = 20
+	out[9].weight = 0
+	return append(out, template{10, func(w *bufio.Writer, r *rand.Rand, t time.Time) {
+		fmt.Fprintf(w, "%s INFO  [search] query q=%s results=%d took %dms cache=miss\n", stamp(t), id(r), r.IntN(500), 20+r.IntN(300))
+	}})
+}
+
 func parseSize(s string) (int64, error) {
 	s = strings.ToUpper(strings.TrimSpace(s))
 	mult := int64(1)
@@ -111,7 +122,11 @@ func main() {
 	span := flag.Duration("span", 24*time.Hour, "time range the logs cover")
 	seed := flag.Uint64("seed", 1, "random seed")
 	gz := flag.Bool("gzip", false, "compress the output")
+	release := flag.Bool("release", false, "write logs as they look after a made-up release: more retries, a new search log, no mailer")
 	flag.Parse()
+	if *release {
+		templates = afterRelease(templates)
+	}
 
 	size, err := parseSize(*sizeFlag)
 	if err != nil {

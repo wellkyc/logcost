@@ -68,6 +68,32 @@ Fluent Bit and the filter processor can't sample by pattern, so for them only th
 
 The rules match the first line of an event. If your shipper splits stack traces into separate records, the frames of a dropped event will still go through.
 
+## What changed since last week
+
+`-diff` compares two inputs, for example logs from before and after a release:
+
+```
+$ logcost -diff -price 1.70 last-week.log after-release.log
+before: 300 MB over 7d (42.9 MB/day)    after: 130 MB over 3d (43.4 MB/day)    +1.1%
+about +$0.02/month at $1.70 per GB
+
+CHANGE   BEFORE/DAY   AFTER/DAY   $/MONTH  LEVEL  TEMPLATE
++255%        2.2 MB      7.9 MB    +$0.29  WARN   WARN [payments] retrying charge <*>, attempt <*> of <*>: upstream timeout after <*>
+-71%         5.5 MB      1.6 MB    -$0.20  DEBUG  DEBUG [cache] hit key=<*> ttl=<*> size=<*>
+new               -      3.2 MB    +$0.16  INFO   INFO [search] query q=<*> results=<*> took <*> cache=miss
+gone         631 KB           -    -$0.03  INFO   INFO [mailer] sent receipt to <*> in <*>
+10 more templates changed less or are under 0.5% of the volume
+```
+
+The total barely moved, but the payment retries tripled, which is worth a look. Both inputs go through the same template tree, so a line from either side always lands in the same template. When both sides have timestamps it compares volume per day, so a week and three days can be put side by side. Templates that changed by less than 25%, or stay under 0.5% of the volume, are left out.
+
+In CI, `-max-growth` makes it fail when logs grow too much:
+
+```bash
+logcost -diff -max-growth 20% baseline.log current.log   # exit code 3 if the volume per day grew more than 20%
+logcost -diff -format markdown baseline.log current.log  # table for a pull request comment
+```
+
 ## Install
 
 Windows (PowerShell):
@@ -111,6 +137,8 @@ Flags:
 | `-format` | `table` | `table`, `json` or `markdown` (handy for pasting into a ticket) |
 | `-suggest` | off | list templates to drop or sample, with savings |
 | `-filter` | | print a config for `vector`, `fluentbit` or `otel` that drops the suggested lines |
+| `-diff` | off | compare two inputs, `logcost -diff before.log after.log` |
+| `-max-growth` | | with `-diff`, exit with code 3 if the volume per day grew more than this, e.g. `20%` |
 | `-multiline` | on | join stack traces and indented lines into one event, `-multiline=false` to count every line |
 | `-similarity` | `0.4` | lower merges more lines into one template, higher splits them |
 | `-no-redact` | off | show secrets and emails as they are, see below |
